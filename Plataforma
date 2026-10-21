@@ -1,0 +1,96 @@
+-- =============================================================================
+-- CONFIGURACIÓN DE PLATAFORMA (Block Spin Independent)
+-- =============================================================================
+local AntiFallConfig = {
+    Enabled = true,             -- Activa/Desactiva la plataforma anti-caída
+    MinimumYLimit = -50,        -- Altura límite del mapa (Si el coche baja de aquí, se activa el imán)
+    FreezeFallVelocity = true,  -- Anula la velocidad de caída vertical para evitar daños por impacto
+    SafetyHeightOffset = 5,     -- Cuántos studs se elevará el coche sobre el límite de peligro
+    LockVelocityY = true        -- Bloquea las fuerzas de gravedad descontroladas en el chasis
+}
+
+local Players = game:GetService("Players")
+local LocalPlayer = Players.LocalPlayer
+local RunService = game:GetService("RunService")
+
+-- Variable interna para registrar la última altura segura en suelo firme
+local lastSafeGroundY = 10
+
+-- Función optimizada para obtener el vehículo actual
+local function getDrivingVehicleModel()
+    local character = LocalPlayer.Character
+    local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+    if not humanoid or not humanoid.Sit then return nil end
+    
+    local seat = humanoid.SeatPart
+    if not seat or not (seat:IsA("VehicleSeat") or seat:IsA("Seat")) then return nil end
+    
+    local vehiclesFolder = workspace:FindFirstChild("Vehicles") or workspace
+    local current = seat
+    while current and current ~= workspace do
+        if current.Parent == vehiclesFolder or current:FindFirstChild("Motors") then
+            return current
+        end
+        current = current.Parent
+    end
+    return seat:FindFirstAncestorOfClass("Model")
+end
+
+-- =============================================================================
+-- ALGORITMO DE PLATAFORMA ANTI-CAÍDA (Adaptación nativa de telemetría de chasis)
+-- =============================================================================
+local function processVehicleAntiFall()
+    if not AntiFallConfig.Enabled then return end
+
+    local carModel = getDrivingVehicleModel()
+    if not carModel then return end
+
+    local primaryPart = carModel.PrimaryPart or carModel:FindFirstChildWhichIsA("BasePart")
+    if not primaryPart then return end
+
+    pcall(function()
+        local currentCFrame = carModel:GetPivot()
+        local currentPos = currentCFrame.Position
+        local currentVelocity = primaryPart.AssemblyLinearVelocity
+
+        -- 1. REGISTRO DE ALTURA SEGURA: Si está sobre terreno firme o calles, guarda la altura
+        local humanoid = LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
+        if humanoid and humanoid.FloorMaterial ~= Enum.Material.Air and currentPos.Y > AntiFallConfig.MinimumYLimit then
+            lastSafeGroundY = currentPos.Y
+        end
+
+        -- 2. DETECCIÓN DE PELIGRO: Si el coche cae por debajo del límite crítico configurado
+        if currentPos.Y < (AntiFallConfig.MinimumYLimit or -50) then
+            -- Determina la altura de rescate (Usa la última calle segura o un desfase de seguridad)
+            local rescueY = math.max(lastSafeGroundY, AntiFallConfig.MinimumYLimit + AntiFallConfig.SafetyHeightOffset)
+            
+            -- Crea la plataforma de CFrame instantánea reposicionando el coche en el aire
+            local targetPosition = Vector3.new(currentPos.X, rescueY, currentPos.Z)
+            carModel:PivotTo(CFrame.new(targetPosition) * (currentCFrame - currentPos))
+
+            -- 3. ANULACIÓN DE ENERGÍA CINÉTICA: Detiene el "momentum" de caída libre
+            if AntiFallConfig.FreezeFallVelocity then
+                -- Deja intacta la velocidad lateral (X, Z) para seguir avanzando, pero congela el eje Y (caída)
+                primaryPart.AssemblyLinearVelocity = Vector3.new(currentVelocity.X, 0, currentVelocity.Z)
+                primaryPart.AssemblyAngularVelocity = Vector3.zero
+            end
+            
+            return
+        end
+
+        -- 4. BLOQUEO DE GRAVEDAD EXTREMA (Evita tirones si el chasis pesa mucho)
+        if AntiFallConfig.LockVelocityY and math.abs(currentVelocity.Y) > 150 then
+            primaryPart.AssemblyLinearVelocity = Vector3.new(currentVelocity.X, math.clamp(currentVelocity.Y, -50, 50), currentVelocity.Z)
+        end
+    end)
+end
+
+-- =============================================================================
+-- BUCLE DE EJECUCIÓN (Sincronizado con la física)
+-- =============================================================================
+-- Se inyecta en PreSimulation para interceptar la caída antes de que el motor de Roblox procese el frame
+RunService.PreSimulation:Connect(function()
+    processVehicleAntiFall()
+end)
+
+print("[Block Spin] Plataforma Anti-Caída unificada correctamente.")
